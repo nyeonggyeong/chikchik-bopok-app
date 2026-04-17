@@ -3,11 +3,31 @@ import '../models/detection_result.dart';
 
 class MockService {
   static const List<DetectionResult> mockData = [
-    DetectionResult(label: '사람', distance: 4.5),
-    DetectionResult(label: '자전거', distance: 2.3),
-    DetectionResult(label: '자동차', distance: 1.2),
-    DetectionResult(label: '볼라드', distance: 0.8),
-    DetectionResult(label: '계단', distance: 3.1),
+    DetectionResult(
+      objectClass: '사람',
+      distanceM: 4.5,
+      bbox: BBox(x1: 30, y1: 60, x2: 180, y2: 360),
+    ),
+    DetectionResult(
+      objectClass: '자전거',
+      distanceM: 2.3,
+      bbox: BBox(x1: 60, y1: 100, x2: 240, y2: 330),
+    ),
+    DetectionResult(
+      objectClass: '자동차',
+      distanceM: 1.2,
+      bbox: BBox(x1: 40, y1: 120, x2: 290, y2: 370),
+    ),
+    DetectionResult(
+      objectClass: '볼라드',
+      distanceM: 0.8,
+      bbox: BBox(x1: 130, y1: 180, x2: 200, y2: 360),
+    ),
+    DetectionResult(
+      objectClass: '계단',
+      distanceM: 3.1,
+      bbox: BBox(x1: 20, y1: 140, x2: 310, y2: 390),
+    ),
   ];
 
   int _index = 0;

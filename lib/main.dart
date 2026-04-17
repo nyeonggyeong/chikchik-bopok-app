@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
-import 'screens/main_screen.dart';
+import 'screens/camera_screen.dart';
 
 // 전역으로 카메라 목록 저장
 List<CameraDescription> globalCameras = [];
@@ -32,7 +32,7 @@ class SafeStepApp extends StatelessWidget {
       title: 'SafeStep',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(brightness: Brightness.dark),
-      home: const MainScreen(),
+      home: const CameraScreen(),
     );
   }
 }

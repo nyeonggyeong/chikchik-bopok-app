@@ -30,6 +30,11 @@ class _CameraScreenState extends State<CameraScreen> {
   bool _isSendingFrame = false;
   bool _isDisposed = false;
 
+  // 피드백 쿨다운용 상태 변수
+  DateTime? _lastSpokenTime;
+  String? _lastSpokenClass;
+  DateTime? _lastHapticTime;
+
   List<DetectionResult> _detections = const [];
 
   @override
@@ -87,6 +92,9 @@ class _CameraScreenState extends State<CameraScreen> {
         _isGuidanceRunning = false;
         _isReconnecting = false; // 복구 상태 해제
         _hasAnnouncedReconnect = false; // 음성 플래그 초기화
+        _lastSpokenTime = null; // 쿨다운 초기화
+        _lastSpokenClass = null;
+        _lastHapticTime = null;
         _detections = const [];
       });
       
@@ -99,45 +107,56 @@ class _CameraScreenState extends State<CameraScreen> {
       _isGuidanceRunning = true;
     });
     await _speak('안내를 시작합니다.'); // 시작 피드백 추가
-    _startPeriodicCapture();
+    _startContinuousCapture();
   }
 
-  void _startPeriodicCapture() {
-    _captureTimer?.cancel();
-    _captureAndPredict();
-    _captureTimer = Timer.periodic(
-      const Duration(milliseconds: 1500),
-      (_) => _captureAndPredict(),
-    );
+  void _startContinuousCapture() {
+    if (_isGuidanceRunning && !_isReconnecting) {
+      _continuousCaptureLoop();
+    }
   }
 
-  Future<void> _captureAndPredict() async {
+  Future<void> _continuousCaptureLoop() async {
+    // 종료되었거나 통신 복구 중이면 루프 중단 (과부하 방지)
     if (!_isGuidanceRunning || _isReconnecting || _isSendingFrame || _cameraController == null) {
       return;
     }
 
     final controller = _cameraController!;
-    if (!controller.value.isInitialized || controller.value.isTakingPicture) return;
+    if (!controller.value.isInitialized || controller.value.isTakingPicture) {
+      // 카메라가 바쁘면 아주 잠깐 대기 후 다시 시도
+      await Future.delayed(const Duration(milliseconds: 100));
+      _startContinuousCapture();
+      return;
+    }
 
     _isSendingFrame = true;
     try {
       final XFile frame = await controller.takePicture();
+      // Isolate 연산 + 네트워크 통신 (UI 멈춤 없음)
       final detectionsOrNull = await _apiService.predictFromXFilePath(frame.path);
+      
       if (detectionsOrNull == null) {
         await _pauseGuidanceDueToNetworkError();
-        return;
+        return; // 에러 시 루프 잠시 중단
       }
-      final detections = detectionsOrNull;
+      
       if (!_isDisposed && mounted) {
         setState(() {
-          _detections = detections;
+          _detections = detectionsOrNull;
         });
       }
-      await _handleVoiceGuidance(detections);
+      await _handleVoiceGuidance(detectionsOrNull);
+
     } catch (_) {
       await _pauseGuidanceDueToNetworkError();
     } finally {
       _isSendingFrame = false;
+      // 작업이 완전히 끝나면 곧바로 다음 사진 촬영 (자연스러운 스로틀링으로 기기 과부하 방지)
+      if (mounted && _isGuidanceRunning && !_isReconnecting) {
+        // 백엔드 여유를 위해 100ms 정도만 쉬고 바로 다음 프레임 요청 (1초에 약 3~5장 달성)
+        Future.delayed(const Duration(milliseconds: 100), _startContinuousCapture);
+      }
     }
   }
 
@@ -151,10 +170,37 @@ class _CameraScreenState extends State<CameraScreen> {
       (a, b) => a.distanceM <= b.distanceM ? a : b,
     );
 
-    final message =
-        '전방 ${nearest.distanceM.toStringAsFixed(1)}미터에 ${nearest.objectClass} 주의';
-    await _speak(message);
-    await _triggerDynamicHaptic(nearest.distanceM);
+    final now = DateTime.now();
+
+    // --- 1. 음성 안내(TTS) 쿨다운 (3초) ---
+    bool shouldSpeak = false;
+    // 물체가 바뀌었거나, 3초가 지났다면 다시 말해줌
+    if (_lastSpokenClass != nearest.objectClass) {
+      shouldSpeak = true;
+    } else if (_lastSpokenTime == null || now.difference(_lastSpokenTime!).inSeconds >= 3) {
+      shouldSpeak = true;
+    }
+
+    if (shouldSpeak) {
+      _lastSpokenClass = nearest.objectClass;
+      _lastSpokenTime = now;
+      // 한국어 이름(koreanName) 사용
+      final message = '전방 ${nearest.distanceM.toStringAsFixed(1)}미터에 ${nearest.koreanName} 주의';
+      // _speak 내부에서 await 하지만, 프레임 루프를 완전히 멈추지 않게 쿨다운 로직이 보호해줌
+      _speak(message); 
+    }
+
+    // --- 2. 진동(Haptic) 쿨다운 (1.5초) ---
+    // 진동 패턴이 길게 이어지므로 끊기지 않게 1.5초 쿨다운을 줌
+    bool shouldVibrate = false;
+    if (_lastHapticTime == null || now.difference(_lastHapticTime!).inMilliseconds >= 1500) {
+      shouldVibrate = true;
+    }
+
+    if (shouldVibrate) {
+      _lastHapticTime = now;
+      _triggerDynamicHaptic(nearest.distanceM);
+    }
   }
 
   Future<void> _pauseGuidanceDueToNetworkError() async {
@@ -213,7 +259,7 @@ class _CameraScreenState extends State<CameraScreen> {
       _hasAnnouncedReconnect = false;
       await _speak('네트워크가 복구되어 안내를 재개합니다.');
       await _handleVoiceGuidance(reconnectResult);
-      _startPeriodicCapture();
+      _startContinuousCapture();
     } catch (_) {
       _scheduleReconnect();
     }

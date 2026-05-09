@@ -22,7 +22,11 @@ class ApiException implements Exception {
 
 class ApiService {
   // 컴퓨터의 Wi-Fi IP 주소로 변경하여 스마트폰에서 접속 가능하도록 설정
+<<<<<<< Updated upstream
   static const String serverBaseUrl = 'http://192.168.1.11:8001';
+=======
+  static const String serverBaseUrl = 'http://192.168.1.2:8001';
+>>>>>>> Stashed changes
   static const Duration _requestTimeout = Duration(seconds: 5);
 
   final http.Client _client;

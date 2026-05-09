@@ -10,9 +10,19 @@ import 'package:image/image.dart' as img;
 
 import '../models/detection_result.dart';
 
+enum ApiErrorType { timeout, noInternet, serverError, parseError, unknown }
+
+class ApiException implements Exception {
+  final ApiErrorType type;
+  final String message;
+  ApiException(this.type, this.message);
+  @override
+  String toString() => 'ApiException($type): $message';
+}
+
 class ApiService {
   // 컴퓨터의 Wi-Fi IP 주소로 변경하여 스마트폰에서 접속 가능하도록 설정
-  static const String serverBaseUrl = 'http://192.168.150.130:8001';
+  static const String serverBaseUrl = 'http://192.168.1.11:8001';
   static const Duration _requestTimeout = Duration(seconds: 5);
 
   final http.Client _client;
@@ -58,9 +68,9 @@ class ApiService {
 
       return await _sendAndParse(request);
     } catch (e) {
-      // 💡 어떤 에러 때문에 터졌는지 터미널에 빨간 글씨로 출력!
       print('🔥 [API Request Error] predictFromXFilePath 실패: $e');
-      return null;
+      if (e is ApiException) rethrow;
+      throw ApiException(ApiErrorType.unknown, e.toString());
     }
   }
 
@@ -105,13 +115,16 @@ class ApiService {
       if (response.statusCode != 200) {
         print('🔥 [API Server Error] 서버 응답 코드 에러: ${response.statusCode}');
         print('🔥 응답 본문: ${response.body}');
-        return null;
+        throw ApiException(
+          ApiErrorType.serverError,
+          '상태코드: ${response.statusCode}',
+        );
       }
 
       final decoded = jsonDecode(response.body);
       if (decoded is! Map<String, dynamic> || !decoded.containsKey('objects')) {
         print('🔥 [API Parse Error] JSON이 예상된 형태(Map with "objects")가 아닙니다.');
-        return null;
+        throw ApiException(ApiErrorType.parseError, '잘못된 JSON 형식');
       }
 
       final objectsList = decoded['objects'] as List;
@@ -120,10 +133,14 @@ class ApiService {
           .whereType<Map>()
           .map((item) => DetectionResult.fromJson(item.cast<String, dynamic>()))
           .toList();
+    } on TimeoutException {
+      throw ApiException(ApiErrorType.timeout, '서버 응답 지연');
+    } on SocketException {
+      throw ApiException(ApiErrorType.noInternet, '네트워크 연결 끊김');
     } catch (e) {
-      // 타임아웃이나 파싱 에러 등을 모두 여기서 잡아서 출력
       print('🔥 [API Send/Parse Error] _sendAndParse 실패: $e');
-      return null;
+      if (e is ApiException) rethrow;
+      throw ApiException(ApiErrorType.unknown, e.toString());
     }
   }
 

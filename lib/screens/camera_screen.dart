@@ -34,6 +34,7 @@ class _CameraScreenState extends State<CameraScreen> {
   DateTime? _lastSpokenTime;
   String? _lastSpokenClass;
   DateTime? _lastHapticTime;
+  DateTime? _lastDelayWarningTime;
 
   List<DetectionResult> _detections = const [];
 
@@ -95,6 +96,7 @@ class _CameraScreenState extends State<CameraScreen> {
         _lastSpokenTime = null; // 쿨다운 초기화
         _lastSpokenClass = null;
         _lastHapticTime = null;
+        _lastDelayWarningTime = null;
         _detections = const [];
       });
       
@@ -133,12 +135,22 @@ class _CameraScreenState extends State<CameraScreen> {
     _isSendingFrame = true;
     try {
       final XFile frame = await controller.takePicture();
+      final requestStart = DateTime.now();
+      
       // Isolate 연산 + 네트워크 통신 (UI 멈춤 없음)
       final detectionsOrNull = await _apiService.predictFromXFilePath(frame.path);
       
       if (detectionsOrNull == null) {
-        await _pauseGuidanceDueToNetworkError();
+        await _pauseGuidanceDueToNetworkError(ApiErrorType.unknown);
         return; // 에러 시 루프 잠시 중단
+      }
+      
+      final elapsed = DateTime.now().difference(requestStart);
+      if (elapsed.inSeconds >= 2) {
+        if (_lastDelayWarningTime == null || DateTime.now().difference(_lastDelayWarningTime!).inSeconds >= 10) {
+          _lastDelayWarningTime = DateTime.now();
+          _speak('분석이 지연되고 있습니다. 잠시 멈춰주세요.');
+        }
       }
       
       if (!_isDisposed && mounted) {
@@ -148,8 +160,10 @@ class _CameraScreenState extends State<CameraScreen> {
       }
       await _handleVoiceGuidance(detectionsOrNull);
 
+    } on ApiException catch (e) {
+      await _pauseGuidanceDueToNetworkError(e.type);
     } catch (_) {
-      await _pauseGuidanceDueToNetworkError();
+      await _pauseGuidanceDueToNetworkError(ApiErrorType.unknown);
     } finally {
       _isSendingFrame = false;
       // 작업이 완전히 끝나면 곧바로 다음 사진 촬영 (자연스러운 스로틀링으로 기기 과부하 방지)
@@ -203,7 +217,7 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
-  Future<void> _pauseGuidanceDueToNetworkError() async {
+  Future<void> _pauseGuidanceDueToNetworkError(ApiErrorType errorType) async {
     _captureTimer?.cancel();
     if (_isReconnecting) return;
 
@@ -216,7 +230,21 @@ class _CameraScreenState extends State<CameraScreen> {
 
     if (!_hasAnnouncedReconnect) {
       _hasAnnouncedReconnect = true;
-      await _speak('네트워크가 불안정하여 3초 후 연결을 재시도합니다.');
+      String message;
+      switch (errorType) {
+        case ApiErrorType.noInternet:
+          message = '인터넷 연결을 확인해 주세요. 재연결을 시도합니다.';
+          break;
+        case ApiErrorType.timeout:
+          message = '서버 응답이 없습니다. 잠시 후 재시도합니다.';
+          break;
+        case ApiErrorType.serverError:
+          message = '서버 오류가 발생했습니다. 탐지가 일시 중단됩니다.';
+          break;
+        default:
+          message = '네트워크가 불안정하여 연결을 재시도합니다.';
+      }
+      await _speak(message);
     }
     _scheduleReconnect();
   }

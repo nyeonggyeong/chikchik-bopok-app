@@ -1,9 +1,13 @@
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/api_service.dart';
 
 class CalibrationScreen extends StatefulWidget {
-  const CalibrationScreen({super.key});
+  final CameraController cameraController;
+  
+  const CalibrationScreen({super.key, required this.cameraController});
 
   @override
   State<CalibrationScreen> createState() => _CalibrationScreenState();
@@ -11,118 +15,152 @@ class CalibrationScreen extends StatefulWidget {
 
 class _CalibrationScreenState extends State<CalibrationScreen> {
   final ApiService _apiService = ApiService();
-  final TextEditingController _dRelController = TextEditingController();
+  bool _isCameraReady = false;
+  bool _isCalibrating = false;
+  String _statusMessage = '1m 앞의 장애물을 중앙에 두고 아래 버튼을 누르세요.';
 
-  double? _p1Rel;
-  double? _p2Rel;
-  bool _isSubmitting = false;
-  String _statusMessage = '현재 상대 깊이(d_rel)를 입력하고 1m/3m 버튼을 순서대로 눌러주세요.';
+  @override
+  void initState() {
+    super.initState();
+  }
+
+  Future<void> _calibrate() async {
+    final controller = widget.cameraController;
+    if (controller.value.isTakingPicture) return;
+
+    setState(() {
+      _isCalibrating = true;
+      _statusMessage = '거리를 측정 중입니다...';
+    });
+
+    try {
+      final frame = await controller.takePicture();
+      // 위험 기준을 구하기 위해 임시로 아주 큰 값을 보냄
+      final detections = await _apiService.predictFromXFilePath(frame.path, dangerThreshold: 100.0);
+
+      if (!mounted) return;
+
+      if (detections == null || detections.isEmpty) {
+        setState(() {
+          _statusMessage = '인식된 물체가 없습니다. 다시 시도해 주세요.';
+        });
+        return;
+      }
+
+      // 가장 가까운 물체의 distanceM(상대 깊이 스코어)를 추출
+      final nearest = detections.reduce((a, b) => a.distanceM <= b.distanceM ? a : b);
+      
+      final newThreshold = nearest.distanceM;
+      
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setDouble('dangerThreshold', newThreshold);
+
+      setState(() {
+        _statusMessage = '보정 완료! 위험 기준값: ${newThreshold.toStringAsFixed(2)}\n이제 이전 화면으로 돌아가세요.';
+      });
+    } catch (e) {
+      setState(() {
+        _statusMessage = '오류 발생: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isCalibrating = false;
+        });
+      }
+    }
+  }
 
   @override
   void dispose() {
-    _dRelController.dispose();
     _apiService.dispose();
     super.dispose();
-  }
-
-  void _savePoint1() {
-    final value = double.tryParse(_dRelController.text.trim());
-    if (value == null || value <= 0) {
-      setState(() {
-        _statusMessage = '유효한 d_rel 값을 입력해 주세요. (예: 0.82)';
-      });
-      return;
-    }
-    setState(() {
-      _p1Rel = value;
-      _statusMessage = '1m 지점이 저장되었습니다. 이제 3m 지점으로 이동해 값을 입력하세요.';
-    });
-  }
-
-  Future<void> _savePoint2AndApply() async {
-    final value = double.tryParse(_dRelController.text.trim());
-    if (value == null || value <= 0) {
-      setState(() {
-        _statusMessage = '유효한 d_rel 값을 입력해 주세요. (예: 0.31)';
-      });
-      return;
-    }
-    if (_p1Rel == null) {
-      setState(() {
-        _statusMessage = '먼저 [1m 저장] 버튼을 눌러주세요.';
-      });
-      return;
-    }
-
-    setState(() {
-      _p2Rel = value;
-      _isSubmitting = true;
-      _statusMessage = '보정값을 서버에 적용하는 중입니다...';
-    });
-
-    final result = await _apiService.updateCalibration(
-      p1Rel: _p1Rel!,
-      p1M: 1.0,
-      p2Rel: _p2Rel!,
-      p2M: 3.0,
-    );
-
-    if (!mounted) return;
-
-    setState(() {
-      _isSubmitting = false;
-      if (result == null) {
-        _statusMessage = '보정 실패: 서버 연결을 확인해 주세요.';
-        return;
-      }
-      final a = result['A'];
-      final b = result['B'];
-      _statusMessage = '보정 완료! A=$a, B=$b';
-    });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('거리 보정 설정')),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text(
-              '1) 1m 지점에서 d_rel 입력 후 [1m 저장]\n'
-              '2) 3m 지점에서 d_rel 입력 후 [3m 저장 + 보정 적용]',
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _dRelController,
-              keyboardType: const TextInputType.numberWithOptions(decimal: true),
-              decoration: const InputDecoration(
-                labelText: '현재 상대 깊이 d_rel',
-                border: OutlineInputBorder(),
-                hintText: '예: 0.82',
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        title: const Text('거리 보정 (캘리브레이션)'),
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+      ),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          Container(
+            color: Colors.black,
+            child: Center(
+              child: Builder(
+                builder: (context) {
+                  var cameraRatio = widget.cameraController.value.aspectRatio;
+                  if (cameraRatio > 1) {
+                    cameraRatio = 1 / cameraRatio;
+                  }
+                  return AspectRatio(
+                    aspectRatio: cameraRatio,
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        CameraPreview(widget.cameraController),
+                        // 중앙 가이드선
+                        Center(
+                          child: Container(
+                            width: 200,
+                            height: 200,
+                            decoration: BoxDecoration(
+                              border: Border.all(color: Colors.greenAccent, width: 2),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
               ),
             ),
-            const SizedBox(height: 12),
-            ElevatedButton(
-              onPressed: _isSubmitting ? null : _savePoint1,
-              child: Text(_p1Rel == null ? '1m 저장' : '1m 저장됨 ($_p1Rel)'),
-            ),
-            const SizedBox(height: 8),
-            ElevatedButton(
-              onPressed: _isSubmitting ? null : _savePoint2AndApply,
-              child: Text(
-                _isSubmitting ? '보정 적용 중...' : '3m 저장 + 보정 적용',
+          ),
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 24, left: 16, right: 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.black54,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        _statusMessage,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: Colors.white, fontSize: 16),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                        backgroundColor: Colors.greenAccent,
+                        foregroundColor: Colors.black,
+                      ),
+                      onPressed: _isCalibrating ? null : _calibrate,
+                      child: Text(
+                        _isCalibrating ? '측정 중...' : '1m 위험 거리로 설정',
+                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
-            const SizedBox(height: 16),
-            Text(
-              _statusMessage,
-              style: const TextStyle(fontSize: 14, color: Colors.lightGreenAccent),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

@@ -22,11 +22,7 @@ class ApiException implements Exception {
 
 class ApiService {
   // 컴퓨터의 Wi-Fi IP 주소로 변경하여 스마트폰에서 접속 가능하도록 설정
-<<<<<<< Updated upstream
-  static const String serverBaseUrl = 'http://192.168.1.11:8001';
-=======
   static const String serverBaseUrl = 'http://192.168.1.2:8001';
->>>>>>> Stashed changes
   static const Duration _requestTimeout = Duration(seconds: 5);
 
   final http.Client _client;
@@ -34,9 +30,8 @@ class ApiService {
   ApiService({http.Client? client}) : _client = client ?? http.Client();
 
   Uri get _predictUri => Uri.parse('$serverBaseUrl/predict/objects-distance');
-  Uri get _calibrationUri => Uri.parse('$serverBaseUrl/calibration');
 
-  Future<List<DetectionResult>?> predictFromXFilePath(String imagePath) async {
+  Future<List<DetectionResult>?> predictFromXFilePath(String imagePath, {double dangerThreshold = 1.5}) async {
     try {
       final originalFile = File(imagePath);
       final originalBytes = await originalFile.readAsBytes();
@@ -70,6 +65,8 @@ class ApiService {
           ),
         );
 
+      request.fields['danger_threshold'] = dangerThreshold.toString();
+
       return await _sendAndParse(request);
     } catch (e) {
       print('🔥 [API Request Error] predictFromXFilePath 실패: $e');
@@ -81,6 +78,7 @@ class ApiService {
   Future<List<DetectionResult>?> predictFromBytes(
     Uint8List imageBytes, {
     String filename = 'frame.jpg',
+    double dangerThreshold = 1.5,
   }) async {
     try {
       final request = http.MultipartRequest('POST', _predictUri)
@@ -92,6 +90,8 @@ class ApiService {
             contentType: MediaType('image', 'jpeg'),
           ),
         );
+
+      request.fields['danger_threshold'] = dangerThreshold.toString();
 
       return await _sendAndParse(request);
     } on TimeoutException {
@@ -148,51 +148,7 @@ class ApiService {
     }
   }
 
-  Future<Map<String, dynamic>?> updateCalibration({
-    required double p1Rel,
-    required double p1M,
-    required double p2Rel,
-    required double p2M,
-  }) async {
-    try {
-      final response = await _client
-          .post(
-            _calibrationUri,
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({
-              'p1_rel': p1Rel,
-              'p1_m': p1M,
-              'p2_rel': p2Rel,
-              'p2_m': p2M,
-            }),
-          )
-          .timeout(_requestTimeout);
-
-      if (response.statusCode != 200) {
-        print('🔥 [Calibration Error] 상태코드: ${response.statusCode}');
-        print('🔥 응답 본문: ${response.body}');
-        return null;
-      }
-
-      final decoded = jsonDecode(response.body);
-      if (decoded is! Map<String, dynamic>) {
-        print('🔥 [Calibration Parse Error] 응답이 Map 형태가 아닙니다.');
-        return null;
-      }
-      return decoded;
-    } on TimeoutException {
-      return null;
-    } on SocketException {
-      return null;
-    } on HttpException {
-      return null;
-    } on FormatException {
-      return null;
-    } catch (e) {
-      print('🔥 [Calibration Request Error] updateCalibration 실패: $e');
-      return null;
-    }
-  }
+  // updateCalibration removed as it is now handled locally via SharedPreferences
 
   void dispose() {
     _client.close();

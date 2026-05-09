@@ -3,6 +3,7 @@ import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:vibration/vibration.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/detection_result.dart';
 import '../services/api_service.dart';
@@ -29,6 +30,7 @@ class _CameraScreenState extends State<CameraScreen> {
   bool _hasAnnouncedReconnect = false;
   bool _isSendingFrame = false;
   bool _isDisposed = false;
+  double _dangerThreshold = 1.5;
 
   // 피드백 쿨다운용 상태 변수
   DateTime? _lastSpokenTime;
@@ -43,6 +45,16 @@ class _CameraScreenState extends State<CameraScreen> {
     super.initState();
     _initializeTts();
     _initializeCamera();
+    _loadDangerThreshold();
+  }
+
+  Future<void> _loadDangerThreshold() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() {
+        _dangerThreshold = prefs.getDouble('dangerThreshold') ?? 1.5;
+      });
+    }
   }
 
   Future<void> _initializeTts() async {
@@ -138,7 +150,10 @@ class _CameraScreenState extends State<CameraScreen> {
       final requestStart = DateTime.now();
       
       // Isolate 연산 + 네트워크 통신 (UI 멈춤 없음)
-      final detectionsOrNull = await _apiService.predictFromXFilePath(frame.path);
+      final detectionsOrNull = await _apiService.predictFromXFilePath(
+        frame.path,
+        dangerThreshold: _dangerThreshold,
+      );
       
       if (detectionsOrNull == null) {
         await _pauseGuidanceDueToNetworkError(ApiErrorType.unknown);
@@ -266,7 +281,10 @@ class _CameraScreenState extends State<CameraScreen> {
 
     try {
       final probeFrame = await controller.takePicture();
-      final reconnectResult = await _apiService.predictFromXFilePath(probeFrame.path);
+      final reconnectResult = await _apiService.predictFromXFilePath(
+        probeFrame.path,
+        dangerThreshold: _dangerThreshold,
+      );
 
       if (reconnectResult == null) {
         _scheduleReconnect();
@@ -339,14 +357,6 @@ class _CameraScreenState extends State<CameraScreen> {
           fit: StackFit.expand,
           children: [
             _buildCameraPreview(),
-            IgnorePointer(
-              child: CustomPaint(
-                painter: DetectionOverlayPainter(
-                  detections: _detections,
-                  strokeColor: const Color(0xFF00E5FF),
-                ),
-              ),
-            ),
             Align(
               alignment: Alignment.bottomCenter,
               child: SafeArea(
@@ -380,11 +390,31 @@ class _CameraScreenState extends State<CameraScreen> {
               child: SafeArea(
                 child: IconButton(
                   onPressed: () async {
+                    if (_cameraController == null || !_cameraController!.value.isInitialized) return;
+
+                    // 안내가 실행 중이면 먼저 종료
+                    if (_isGuidanceRunning || _isReconnecting) {
+                      _captureTimer?.cancel();
+                      _reconnectTimer?.cancel();
+                      await _stopCurrentSpeech();
+                      setState(() {
+                        _isGuidanceRunning = false;
+                        _isReconnecting = false;
+                      });
+                    }
+
+                    if (!mounted) return;
+
                     await Navigator.of(context).push(
                       MaterialPageRoute<void>(
-                        builder: (_) => const CalibrationScreen(),
+                        builder: (_) => CalibrationScreen(cameraController: _cameraController!),
                       ),
                     );
+                    
+                    // 돌아오면 설정값만 불러오기
+                    if (mounted) {
+                      await _loadDangerThreshold();
+                    }
                   },
                   icon: const Icon(Icons.tune, color: Colors.white),
                   tooltip: '거리 보정 설정',
@@ -403,18 +433,30 @@ class _CameraScreenState extends State<CameraScreen> {
     }
 
     final controller = _cameraController!;
-    final previewSize = controller.value.previewSize;
-    if (previewSize == null) {
-      return const ColoredBox(color: Colors.black);
+    var cameraRatio = controller.value.aspectRatio;
+    if (cameraRatio > 1) {
+      cameraRatio = 1 / cameraRatio; // 세로 모드 보정
     }
 
-    return SizedBox.expand(
-      child: FittedBox(
-        fit: BoxFit.cover,
-        child: SizedBox(
-          width: previewSize.height,
-          height: previewSize.width,
-          child: CameraPreview(controller),
+    return Container(
+      color: Colors.black,
+      child: Center(
+        child: AspectRatio(
+          aspectRatio: cameraRatio,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              CameraPreview(controller),
+              IgnorePointer(
+                child: CustomPaint(
+                  painter: DetectionOverlayPainter(
+                    detections: _detections,
+                    strokeColor: const Color(0xFF00E5FF),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

@@ -36,8 +36,12 @@ class DetectionOverlayPainter extends CustomPainter {
 
       canvas.drawRect(rect, rectPaint);
 
+      final distLabel = detection.distanceRaw.isNotEmpty
+          ? detection.distanceRaw
+          : '${detection.distanceM.toStringAsFixed(1)}m';
+
       final textSpan = TextSpan(
-        text: '${detection.objectClass} ${detection.distanceM.toStringAsFixed(1)}m',
+        text: '${detection.label} $distLabel',
         style: const TextStyle(
           color: Colors.white,
           fontSize: 13,

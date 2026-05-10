@@ -35,26 +35,77 @@ class BBox {
     return BBox(x1: x1, y1: y1, x2: x2, y2: y2);
   }
 
+  /// `/predict/objects-distance` 응답 전체에서 박스 추출 (픽셀 xyxy 우선).
+  factory BBox.fromPredictionEnvelope(Map<String, dynamic> json) {
+    // 1. 변수 선언을 가장 먼저 합니다.
+    final nested = json['bbox_xyxy_px'];
+    final bbox = json['bbox'];
+
+    // 2. [1순위] 루트에 있는 x1, y1, x2, y2 확인 (백엔드에서 보낸 비율 좌표)
+    if (json['x1'] is num &&
+        json['y1'] is num &&
+        json['x2'] is num &&
+        json['y2'] is num) {
+      return BBox(
+        x1: (json['x1'] as num).toDouble(),
+        y1: (json['y1'] as num).toDouble(),
+        x2: (json['x2'] as num).toDouble(),
+        y2: (json['y2'] as num).toDouble(),
+      );
+    }
+
+    // 3. [2순위] bbox 맵 확인 (비율 좌표 x, y, w, h)
+    if (bbox is Map<String, dynamic>) {
+      return BBox.fromJson(bbox);
+    }
+
+    // 4. [3순위] bbox_xyxy_px 확인 (픽셀 좌표)
+    if (nested is Map) {
+      return BBox.fromJson(nested.cast<String, dynamic>());
+    }
+
+    // 5. 아무것도 없다면 0으로 반환
+    return const BBox(x1: 0, y1: 0, x2: 0, y2: 0);
+  }
+
   Map<String, dynamic> toJson() {
     return {'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2};
   }
 }
 
 class DetectionResult {
-  final String objectClass;
+  /// YOLO 클래스명 등 (예: person, chair)
+  final String label;
+  /// 미터 거리 숫자 (깊이 맵 또는 distance 문자열에서 파싱)
   final double distanceM;
   final BBox bbox;
   final double? confidence;
 
+  /// 백엔드 `distance` 필드 문자열 원본 (예: "3.5m")
+  final String distanceRaw;
+
+  /// "왼쪽" | "중앙" | "오른쪽"
+  final String position;
+
+  /// 음성 가이드용 한국어 문장 (`/predict/objects-distance` 전용이면 채워짐)
+  final String description;
+
+  /// chair일 때 빈 좌석 여부, 그 외 null
+  final bool? seatIsEmpty;
+
   const DetectionResult({
-    required this.objectClass,
+    required this.label,
     required this.distanceM,
     required this.bbox,
     this.confidence,
+    this.distanceRaw = '',
+    this.position = '중앙',
+    this.description = '',
+    this.seatIsEmpty,
   });
 
-  // 기존 코드 호환용 alias
-  String get label => objectClass;
+  /// 레거시 화면/위젯 호환용
+  String get objectClass => label;
   double get distance => distanceM;
 
   // 영문 클래스명을 한국어로 변환해주는 getter (TTS용)
@@ -141,15 +192,35 @@ class DetectionResult {
       'hair drier': '헤어드라이어',
       'toothbrush': '칫솔',
     };
-    return translationMap[objectClass.toLowerCase()] ?? objectClass;
+    return translationMap[label.toLowerCase()] ?? label;
+  }
+
+  static double _distanceMFromJson(Map<String, dynamic> json) {
+    final est = json['distance_estimate_m'];
+    if (est is num) {
+      final v = est.toDouble();
+      if (v > 0) return v;
+    }
+
+    final raw = json['distance'];
+    if (raw is String) {
+      final m = RegExp(
+        r'([\d.]+)\s*m?',
+        caseSensitive: false,
+      ).firstMatch(raw.trim());
+      if (m != null) {
+        final parsed = double.tryParse(m.group(1)!);
+        if (parsed != null && parsed >= 0) return parsed;
+      }
+    }
+
+    return 0.0;
   }
 
   factory DetectionResult.fromJson(Map<String, dynamic> json) {
-    // 백엔드 Lite-Mono 모델이 계산한 거리(m) 사용
-    double distance = (json['distance_estimate_m'] as num?)?.toDouble() ?? 0;
+    var distance = _distanceMFromJson(json);
 
-    // 만약 깊이 추정이 실패했거나 없는 경우 백엔드의 is_dangerous 속성을 참고하여 안전/위험 거리 임시 할당
-    if (distance == 0) {
+    if (distance <= 0) {
       if (json['is_dangerous'] == true) {
         distance = 1.0;
       } else if (json['is_over_30_percent'] == true) {
@@ -159,25 +230,38 @@ class DetectionResult {
       }
     }
 
+    String? lbl;
+    final rawLbl = json['label'];
+    if (rawLbl is String && rawLbl.trim().isNotEmpty) {
+      lbl = rawLbl.trim();
+    }
+
     return DetectionResult(
-      objectClass:
+      label:
+          lbl ??
           (json['class_name'] as String?) ??
           (json['class'] as String?) ??
           'unknown',
       distanceM: distance,
-      bbox: BBox.fromJson(
-        (json['bbox'] as Map?)?.cast<String, dynamic>() ?? {},
-      ),
+      bbox: BBox.fromPredictionEnvelope(json),
       confidence: (json['confidence'] as num?)?.toDouble(),
+      distanceRaw: (json['distance'] as String?) ?? '',
+      position: (json['position'] as String?) ?? '중앙',
+      description: (json['description'] as String?) ?? '',
+      seatIsEmpty: json['is_empty'] as bool?,
     );
   }
 
   Map<String, dynamic> toJson() {
     return {
-      'class': objectClass,
+      'label': label,
       'distance_m': distanceM,
       'bbox': bbox.toJson(),
       if (confidence != null) 'confidence': confidence,
+      if (distanceRaw.isNotEmpty) 'distance': distanceRaw,
+      if (description.isNotEmpty) 'description': description,
+      if (seatIsEmpty != null) 'is_empty': seatIsEmpty,
+      'position': position,
     };
   }
 

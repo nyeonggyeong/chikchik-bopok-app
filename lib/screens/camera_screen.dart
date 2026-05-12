@@ -38,6 +38,7 @@ class _CameraScreenState extends State<CameraScreen> {
   DateTime? _lastHapticTime;
   DateTime? _lastDelayWarningTime;
 
+  final List<List<DetectionResult>> _history = [];
   List<DetectionResult> _detections = const [];
 
   @override
@@ -109,6 +110,7 @@ class _CameraScreenState extends State<CameraScreen> {
         _lastSpokenClass = null;
         _lastHapticTime = null;
         _lastDelayWarningTime = null;
+        _history.clear();
         _detections = const [];
       });
       
@@ -169,11 +171,12 @@ class _CameraScreenState extends State<CameraScreen> {
       }
       
       if (!_isDisposed && mounted) {
+        final smoothedDetections = _smoothDetections(detectionsOrNull);
         setState(() {
-          _detections = detectionsOrNull;
+          _detections = smoothedDetections;
         });
+        await _handleVoiceGuidance(smoothedDetections);
       }
-      await _handleVoiceGuidance(detectionsOrNull);
 
     } on ApiException catch (e) {
       await _pauseGuidanceDueToNetworkError(e.type);
@@ -189,13 +192,54 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
+  List<DetectionResult> _smoothDetections(List<DetectionResult> currentDetections) {
+    _history.add(currentDetections);
+    if (_history.length > 3) _history.removeAt(0);
+
+    List<DetectionResult> smoothed = [];
+    for (var current in currentDetections) {
+      double totalDist = 0;
+      int count = 0;
+      int maxRisk = current.riskLevel;
+
+      for (var frame in _history) {
+        for (var past in frame) {
+          if (past.label == current.label) {
+            totalDist += past.distanceM;
+            count++;
+            if (past.riskLevel > maxRisk) maxRisk = past.riskLevel;
+            break;
+          }
+        }
+      }
+
+      // 프레임 플리커링 방지: 최소 2번 이상 등장했거나, 매우 위험(riskLevel == 2)하면 즉시 포함
+      if (count >= 2 || current.riskLevel == 2) {
+        final avgDist = count > 0 ? totalDist / count : current.distanceM;
+        smoothed.add(DetectionResult(
+          label: current.label,
+          distanceM: avgDist,
+          bbox: current.bbox,
+          confidence: current.confidence,
+          distanceRaw: current.distanceRaw,
+          position: current.position,
+          description: current.description,
+          seatIsEmpty: current.seatIsEmpty,
+          riskLevel: maxRisk,
+        ));
+      }
+    }
+    return smoothed;
+  }
+
   Future<void> _handleVoiceGuidance(List<DetectionResult> detections) async {
-    if (detections.isEmpty) {
-      // 안전 구간은 무음 유지
+    // 위험도가 0보다 큰(주의/위험) 객체만 필터링
+    final riskyObjects = detections.where((d) => d.riskLevel > 0).toList();
+    if (riskyObjects.isEmpty) {
       return;
     }
 
-    final nearest = detections.reduce(
+    final nearest = riskyObjects.reduce(
       (a, b) => a.distanceM <= b.distanceM ? a : b,
     );
 
@@ -203,7 +247,6 @@ class _CameraScreenState extends State<CameraScreen> {
 
     // --- 1. 음성 안내(TTS) 쿨다운 (3초) ---
     bool shouldSpeak = false;
-    // 물체가 바뀌었거나, 3초가 지났다면 다시 말해줌
     if (_lastSpokenClass != nearest.objectClass) {
       shouldSpeak = true;
     } else if (_lastSpokenTime == null || now.difference(_lastSpokenTime!).inSeconds >= 3) {
@@ -213,22 +256,23 @@ class _CameraScreenState extends State<CameraScreen> {
     if (shouldSpeak) {
       _lastSpokenClass = nearest.objectClass;
       _lastSpokenTime = now;
-      // 한국어 이름(koreanName) 사용
-      final message = '전방 ${nearest.distanceM.toStringAsFixed(1)}미터에 ${nearest.koreanName} 주의';
-      // _speak 내부에서 await 하지만, 프레임 루프를 완전히 멈추지 않게 쿨다운 로직이 보호해줌
+      final message = nearest.riskLevel == 2 
+          ? '정지! ${nearest.koreanName} 위험'
+          : '전방 ${nearest.distanceM.toStringAsFixed(1)}미터에 ${nearest.koreanName} 주의';
       _speak(message); 
     }
 
-    // --- 2. 진동(Haptic) 쿨다운 (1.5초) ---
-    // 진동 패턴이 길게 이어지므로 끊기지 않게 1.5초 쿨다운을 줌
+    // --- 2. 진동(Haptic) 쿨다운 (위험: 1.5초, 주의: 2.5초) ---
     bool shouldVibrate = false;
-    if (_lastHapticTime == null || now.difference(_lastHapticTime!).inMilliseconds >= 1500) {
+    int cooldownMs = nearest.riskLevel == 2 ? 1500 : 2500;
+    
+    if (_lastHapticTime == null || now.difference(_lastHapticTime!).inMilliseconds >= cooldownMs) {
       shouldVibrate = true;
     }
 
     if (shouldVibrate) {
       _lastHapticTime = now;
-      _triggerDynamicHaptic(nearest.distanceM);
+      _triggerDynamicHaptic(nearest.riskLevel);
     }
   }
 
@@ -311,19 +355,17 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
-  Future<void> _triggerDynamicHaptic(double distanceM) async {
+  Future<void> _triggerDynamicHaptic(int riskLevel) async {
     final hasVibrator = await Vibration.hasVibrator() ?? false;
     if (!hasVibrator) return;
 
-    if (distanceM <= 1.0) {
-      await Vibration.vibrate(pattern: [0, 250, 120, 250], intensities: [0, 255, 0, 255]);
-      return;
+    if (riskLevel == 2) {
+      // 위험: 다급한 3연속 진동
+      await Vibration.vibrate(pattern: [0, 200, 100, 200, 100, 200], intensities: [0, 255, 0, 255, 0, 255]);
+    } else if (riskLevel == 1) {
+      // 주의: 가벼운 짧은 진동 1번
+      await Vibration.vibrate(duration: 200, amplitude: 128);
     }
-    if (distanceM <= 2.0) {
-      await Vibration.vibrate(pattern: [0, 160, 100, 160], intensities: [0, 180, 0, 180]);
-      return;
-    }
-    await Vibration.vibrate(duration: 100, amplitude: 100);
   }
 
   Future<void> _stopCurrentSpeech() async {

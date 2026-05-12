@@ -93,6 +93,9 @@ class DetectionResult {
   /// chair일 때 빈 좌석 여부, 그 외 null
   final bool? seatIsEmpty;
 
+  /// 위험 단계 (0: 안전, 1: 주의, 2: 위험)
+  final int riskLevel;
+
   const DetectionResult({
     required this.label,
     required this.distanceM,
@@ -102,6 +105,7 @@ class DetectionResult {
     this.position = '중앙',
     this.description = '',
     this.seatIsEmpty,
+    this.riskLevel = 0,
   });
 
   /// 레거시 화면/위젯 호환용
@@ -249,6 +253,7 @@ class DetectionResult {
       position: (json['position'] as String?) ?? '중앙',
       description: (json['description'] as String?) ?? '',
       seatIsEmpty: json['is_empty'] as bool?,
+      riskLevel: (json['risk_level'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -262,6 +267,7 @@ class DetectionResult {
       if (description.isNotEmpty) 'description': description,
       if (seatIsEmpty != null) 'is_empty': seatIsEmpty,
       'position': position,
+      'risk_level': riskLevel,
     };
   }
 

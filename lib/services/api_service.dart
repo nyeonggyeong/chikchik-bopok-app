@@ -22,8 +22,8 @@ class ApiException implements Exception {
 
 class ApiService {
   // 컴퓨터의 Wi-Fi IP 주소로 변경하여 스마트폰에서 접속 가능하도록 설정
-  static const String serverBaseUrl = 'http://192.168.1.2:8001';
-  static const Duration _requestTimeout = Duration(seconds: 5);
+  static const String serverBaseUrl = 'http://192.168.45.228:8001';
+  static const Duration _requestTimeout = Duration(seconds: 30);
 
   final http.Client _client;
 
@@ -31,7 +31,10 @@ class ApiService {
 
   Uri get _predictUri => Uri.parse('$serverBaseUrl/predict/objects-distance');
 
-  Future<List<DetectionResult>?> predictFromXFilePath(String imagePath, {double dangerThreshold = 1.5}) async {
+  Future<List<DetectionResult>?> predictFromXFilePath(
+    String imagePath, {
+    double dangerThreshold = 1.5,
+  }) async {
     try {
       final originalFile = File(imagePath);
       final originalBytes = await originalFile.readAsBytes();

@@ -17,7 +17,7 @@ class CameraScreen extends StatefulWidget {
   State<CameraScreen> createState() => _CameraScreenState();
 }
 
-class _CameraScreenState extends State<CameraScreen> {
+class _CameraScreenState extends State<CameraScreen> with TickerProviderStateMixin, WidgetsBindingObserver {
   CameraController? _cameraController;
   final ApiService _apiService = ApiService();
   final FlutterTts _flutterTts = FlutterTts();
@@ -31,39 +31,104 @@ class _CameraScreenState extends State<CameraScreen> {
   bool _isSendingFrame = false;
   bool _isDisposed = false;
   double _dangerThreshold = 1.5;
+  double _referenceDepth = 1.0;
 
-  // 피드백 쿨다운용 상태 변수
-  DateTime? _lastSpokenTime;
-  String? _lastSpokenClass;
-  DateTime? _lastHapticTime;
+  // 피드백 쿨다운 및 상태 변수
+  String _lastRiskLevel = 'safe';
+  String _lastMainHazard = '';
+  String _lastSpokenMessage = '';
+  DateTime? _lastFeedbackTime;
+  String _lastSafeDirection = 'forward';
+
   DateTime? _lastDelayWarningTime;
 
+  String _mainHazard = '';
+  String _riskLevel = 'safe';
+  String _safeDirection = 'forward';
+
   final List<List<DetectionResult>> _history = [];
+  final List<String> _directionHistory = [];
   List<DetectionResult> _detections = const [];
+  PredictionResponse? _lastResponse; // UI 표시용 저장
+
+  // 디버그 모드 및 애니메이션
+  bool _debugMode = false;
+  late AnimationController _pulseController;
+
+  // TTS 큐 및 상태 관리
+  bool _isSpeaking = false;
+  final List<Map<String, dynamic>> _speechQueue = [];
+  String? _currentSpeakingMessage;
+  String? _lastSituationKey;
+  DateTime? _queuedMessageTimestamp;
+
+  // 안정화용 변수 (Motion Stability)
+  String _candidateMainHazard = '';
+  int _candidateHazardCount = 0;
+  String _candidateSafeDirection = 'forward';
+  int _candidateDirectionCount = 0;
+  int _safeCounter = 0;
+  int _hazardHoldCounter = 0;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    debugPrint('[Lifecycle] CameraScreen initState');
+    
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat(reverse: true);
+
     _initializeTts();
     _initializeCamera();
-    _loadDangerThreshold();
+    _loadCalibrationData();
   }
 
-  Future<void> _loadDangerThreshold() async {
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    debugPrint('[Lifecycle] state changed to: $state');
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+      debugPrint('[Lifecycle] App is backgrounded or detached. Stopping speech.');
+      _stopCurrentSpeech();
+    }
+  }
+
+  Future<void> _loadCalibrationData() async {
     final prefs = await SharedPreferences.getInstance();
     if (mounted) {
       setState(() {
         _dangerThreshold = prefs.getDouble('dangerThreshold') ?? 1.5;
+        _referenceDepth = prefs.getDouble('referenceDepth') ?? 1.0;
       });
     }
   }
 
   Future<void> _initializeTts() async {
     await _flutterTts.setLanguage('ko-KR');
-    await _flutterTts.setSpeechRate(0.45);
+    await _flutterTts.setSpeechRate(0.5); // 약간 더 빠르게 조절
     await _flutterTts.setVolume(1.0);
     await _flutterTts.awaitSpeakCompletion(true);
+
+    _flutterTts.setStartHandler(() {
+      if (mounted) setState(() => _isSpeaking = true);
+      debugPrint('TTS started: $_currentSpeakingMessage');
+    });
+
+    _flutterTts.setCompletionHandler(() {
+      if (mounted) setState(() => _isSpeaking = false);
+      debugPrint('TTS completed');
+      _processNextSpeech();
+    });
+
+    _flutterTts.setErrorHandler((msg) {
+      if (mounted) setState(() => _isSpeaking = false);
+      debugPrint('TTS error: $msg');
+      _processNextSpeech();
+    });
   }
+
 
   Future<void> _initializeCamera() async {
     final cameras = await availableCameras();
@@ -97,24 +162,33 @@ class _CameraScreenState extends State<CameraScreen> {
 
     // 💡 핵심: 복구 중(_isReconnecting)이거나 안내 중일 때 더블 탭하면 무조건 종료!
     if (_isGuidanceRunning || _isReconnecting) {
+      debugPrint('[Action] Guidance stopping manually by user toggle');
       _captureTimer?.cancel();
-      _reconnectTimer?.cancel(); // 복구 타이머도 확실히 꺼줌
+      _reconnectTimer?.cancel(); 
       await _stopCurrentSpeech();
       
-      if (!mounted) return;
+      if (!mounted || _isDisposed) return;
       setState(() {
         _isGuidanceRunning = false;
-        _isReconnecting = false; // 복구 상태 해제
-        _hasAnnouncedReconnect = false; // 음성 플래그 초기화
-        _lastSpokenTime = null; // 쿨다운 초기화
-        _lastSpokenClass = null;
-        _lastHapticTime = null;
-        _lastDelayWarningTime = null;
-        _history.clear();
-        _detections = const [];
+        _isReconnecting = false;
+        // ... (기존 변수 초기화 로직 유지)
+        _lastRiskLevel = 'safe';
+        _lastMainHazard = '';
+        _lastSpokenMessage = '';
+        _lastFeedbackTime = null;
+        _lastSafeDirection = 'forward';
+        _mainHazard = '';
+        _riskLevel = 'safe';
+        _safeDirection = 'forward';
+        _speechQueue.clear();
+        _isSpeaking = false;
+        _currentSpeakingMessage = null;
       });
       
-      await _speak('안내를 중지합니다.'); // 종료 피드백 추가
+      // 앱이 종료 중이 아닐 때만 음성 안내
+      if (!_isDisposed) {
+        await _speak('안내를 중지합니다.');
+      }
       return;
     }
 
@@ -134,13 +208,13 @@ class _CameraScreenState extends State<CameraScreen> {
 
   Future<void> _continuousCaptureLoop() async {
     // 종료되었거나 통신 복구 중이면 루프 중단 (과부하 방지)
-    if (!_isGuidanceRunning || _isReconnecting || _isSendingFrame || _cameraController == null) {
+    if (!_isGuidanceRunning || _isReconnecting || _isSendingFrame || _cameraController == null || _isDisposed) {
       return;
     }
 
     final controller = _cameraController!;
-    if (!controller.value.isInitialized || controller.value.isTakingPicture) {
-      // 카메라가 바쁘면 아주 잠깐 대기 후 다시 시도
+    if (!controller.value.isInitialized || controller.value.isTakingPicture || _isDisposed) {
+      // 카메라가 바쁘거나 종료 중이면 아주 잠깐 대기 후 다시 시도
       await Future.delayed(const Duration(milliseconds: 100));
       _startContinuousCapture();
       return;
@@ -148,16 +222,21 @@ class _CameraScreenState extends State<CameraScreen> {
 
     _isSendingFrame = true;
     try {
+      if (_isDisposed) return;
       final XFile frame = await controller.takePicture();
+      if (_isDisposed) return;
+      
       final requestStart = DateTime.now();
       
-      // Isolate 연산 + 네트워크 통신 (UI 멈춤 없음)
-      final detectionsOrNull = await _apiService.predictFromXFilePath(
+      final responseOrNull = await _apiService.predictFromXFilePath(
         frame.path,
         dangerThreshold: _dangerThreshold,
+        referenceDepth: _referenceDepth,
       );
       
-      if (detectionsOrNull == null) {
+      if (_isDisposed) return;
+      
+      if (responseOrNull == null) {
         await _pauseGuidanceDueToNetworkError(ApiErrorType.unknown);
         return; // 에러 시 루프 잠시 중단
       }
@@ -171,11 +250,36 @@ class _CameraScreenState extends State<CameraScreen> {
       }
       
       if (!_isDisposed && mounted) {
-        final smoothedDetections = _smoothDetections(detectionsOrNull);
+        final displayObjects = responseOrNull.displayObjects;
+        final smoothedDetections = _smoothDetections(displayObjects);
+        
+        // 안전 방향 스무딩 (안정화)
+        final rawSafeDir = responseOrNull.safeDirection;
+        _directionHistory.add(rawSafeDir);
+        if (_directionHistory.length > 3) _directionHistory.removeAt(0);
+        
+        String finalSafeDir = rawSafeDir;
+        if (rawSafeDir != 'stop') {
+          final counts = <String, int>{};
+          for (var d in _directionHistory) {
+            counts[d] = (counts[d] ?? 0) + 1;
+          }
+          final mostFrequent = counts.entries.reduce((a, b) => a.value >= b.value ? a : b);
+          if (mostFrequent.value >= 2) {
+            finalSafeDir = mostFrequent.key;
+          } else {
+            finalSafeDir = _safeDirection;
+          }
+        }
+
         setState(() {
+          _mainHazard = responseOrNull.mainHazard;
+          _riskLevel = responseOrNull.riskLevel;
+          _safeDirection = finalSafeDir;
           _detections = smoothedDetections;
+          _lastResponse = responseOrNull;
         });
-        await _handleVoiceGuidance(smoothedDetections);
+        await _handleVoiceGuidance(smoothedDetections, responseOrNull);
       }
 
     } on ApiException catch (e) {
@@ -218,61 +322,173 @@ class _CameraScreenState extends State<CameraScreen> {
         final avgDist = count > 0 ? totalDist / count : current.distanceM;
         smoothed.add(DetectionResult(
           label: current.label,
-          distanceM: avgDist,
+          labelKo: current.labelKo,
+          estimatedDistanceM: avgDist,
           bbox: current.bbox,
           confidence: current.confidence,
           distanceRaw: current.distanceRaw,
+          distanceText: current.distanceText,
           position: current.position,
+          positionKo: current.positionKo,
           description: current.description,
-          seatIsEmpty: current.seatIsEmpty,
+          isEmpty: current.isEmpty,
           riskLevel: maxRisk,
+          motionState: current.motionState,
+          rawDepthValue: current.rawDepthValue,
+          referenceDepth: current.referenceDepth,
+          distanceConfidence: current.distanceConfidence,
         ));
       }
     }
     return smoothed;
   }
 
-  Future<void> _handleVoiceGuidance(List<DetectionResult> detections) async {
-    // 위험도가 0보다 큰(주의/위험) 객체만 필터링
+  Future<void> _handleVoiceGuidance(List<DetectionResult> detections, PredictionResponse response) async {
+    if (!_isGuidanceRunning || _isReconnecting) return;
+
     final riskyObjects = detections.where((d) => d.riskLevel > 0).toList();
-    if (riskyObjects.isEmpty) {
+    
+    String currentRiskLevel = response.riskLevel;
+    String currentMainHazard = response.mainHazard;
+    String spokenSentence = '';
+
+    if (riskyObjects.isNotEmpty) {
+      _hazardHoldCounter = 0;
+      _safeCounter = 0;
+    } else {
+      if (_hazardHoldCounter < 2 && _lastMainHazard.isNotEmpty) {
+        _hazardHoldCounter++;
+        currentMainHazard = _lastMainHazard;
+      } else {
+        currentRiskLevel = 'safe';
+      }
+    }
+
+    // 상황 키 생성 (Phase 5.6: 상황 변화 감지용)
+    final objectsKey = response.displayObjects.map((o) => '${o.labelKo}:${o.riskLevel}').join(',');
+    final currentSituationKey = '${currentRiskLevel}_${response.safeDirection}_$objectsKey';
+
+    bool isUrgent = currentRiskLevel == 'danger' || response.safeDirection == 'stop';
+
+    if (response.guideMessage.isNotEmpty) {
+      spokenSentence = response.guideMessage;
+    }
+
+    final now = DateTime.now();
+    bool shouldProvideFeedback = false;
+
+    // 3. 안내 트리거 조건 (Phase 5.6 개선)
+    if (isUrgent && (_lastRiskLevel != 'danger' || _lastSafeDirection != 'stop')) {
+      shouldProvideFeedback = true;
+    } else if (spokenSentence.isNotEmpty && _lastSpokenMessage != spokenSentence) {
+      // 메시지가 바뀌었을 때만 안내 (쿨다운 적용)
+      int cooldown = (spokenSentence.contains('안전') || spokenSentence.contains('직진')) ? 8 : 3;
+      if (now.difference(_lastFeedbackTime ?? DateTime(0)).inSeconds >= cooldown) {
+        shouldProvideFeedback = true;
+      }
+    }
+
+    if (shouldProvideFeedback && spokenSentence.isNotEmpty) {
+      _enqueueSpeech(spokenSentence, currentSituationKey, urgent: isUrgent, interrupt: isUrgent);
+      
+      // 위험도에 따른 차별화된 햅틱 진동
+      if (isUrgent || (currentRiskLevel == 'warning' && _lastRiskLevel != 'warning')) {
+         _triggerDynamicHaptic(currentRiskLevel == 'danger' ? 3 : 1);
+      }
+
+      _lastRiskLevel = currentRiskLevel;
+      _lastSafeDirection = response.safeDirection;
+      _lastMainHazard = currentMainHazard;
+      _lastSpokenMessage = spokenSentence;
+      _lastFeedbackTime = now;
+      _lastSituationKey = currentSituationKey;
+      debugPrint('Guidance triggered: $spokenSentence');
+    }
+  }
+
+  void _enqueueSpeech(String message, String situationKey, {bool urgent = false, bool interrupt = false}) {
+    if (interrupt) {
+      _flutterTts.stop();
+      _speechQueue.clear();
+      _isSpeaking = false;
+    }
+
+    // Phase 5.6: 큐에는 최신 메시지 1개만 유지 (동기화 지연 방지)
+    if (_speechQueue.isNotEmpty && !urgent) {
+      _speechQueue.clear();
+    }
+
+    _speechQueue.add({
+      'message': message,
+      'timestamp': DateTime.now(),
+      'situationKey': situationKey,
+      'urgent': urgent,
+    });
+    
+    _queuedMessageTimestamp = DateTime.now();
+    _processNextSpeech();
+  }
+
+  Future<void> _processNextSpeech() async {
+    if (_isSpeaking || _speechQueue.isEmpty) return;
+
+    _isSpeaking = true;
+    final item = _speechQueue.removeAt(0);
+    final String message = item['message'];
+    final DateTime timestamp = item['timestamp'];
+    final String msgSituationKey = item['situationKey'];
+    final bool urgent = item['urgent'];
+
+    final now = DateTime.now();
+    
+    // Phase 5.6: 오래된 메시지 폐기 로직
+    bool isStale = now.difference(timestamp).inSeconds >= 2;
+    bool isSituationChanged = _lastSituationKey != null && _lastSituationKey != msgSituationKey;
+
+    if (!urgent && (isStale || isSituationChanged)) {
+      debugPrint('🚫 [TTS Skip] Stale or Situation changed: $message');
+      _isSpeaking = false;
+      _processNextSpeech();
       return;
     }
 
-    final nearest = riskyObjects.reduce(
-      (a, b) => a.distanceM <= b.distanceM ? a : b,
-    );
-
-    final now = DateTime.now();
-
-    // --- 1. 음성 안내(TTS) 쿨다운 (3초) ---
-    bool shouldSpeak = false;
-    if (_lastSpokenClass != nearest.objectClass) {
-      shouldSpeak = true;
-    } else if (_lastSpokenTime == null || now.difference(_lastSpokenTime!).inSeconds >= 3) {
-      shouldSpeak = true;
+    if (mounted) {
+      setState(() {
+        _currentSpeakingMessage = message;
+      });
     }
 
-    if (shouldSpeak) {
-      _lastSpokenClass = nearest.objectClass;
-      _lastSpokenTime = now;
-      final message = nearest.riskLevel == 2 
-          ? '정지! ${nearest.koreanName} 위험'
-          : '전방 ${nearest.distanceM.toStringAsFixed(1)}미터에 ${nearest.koreanName} 주의';
-      _speak(message); 
-    }
+    await _speakImmediately(message);
 
-    // --- 2. 진동(Haptic) 쿨다운 (위험: 1.5초, 주의: 2.5초) ---
-    bool shouldVibrate = false;
-    int cooldownMs = nearest.riskLevel == 2 ? 1500 : 2500;
+    if (mounted) {
+      setState(() {
+        _currentSpeakingMessage = null;
+      });
+    }
     
-    if (_lastHapticTime == null || now.difference(_lastHapticTime!).inMilliseconds >= cooldownMs) {
-      shouldVibrate = true;
-    }
+    _isSpeaking = false;
+    _processNextSpeech();
+  }
 
-    if (shouldVibrate) {
-      _lastHapticTime = now;
-      _triggerDynamicHaptic(nearest.riskLevel);
+  Future<void> _speakImmediately(String message) async {
+    // 기존 _speak와 유사하지만 awaitSpeakCompletion을 고려한 직접 호출
+    await _flutterTts.speak(message);
+  }
+
+  String _getIga(String word) {
+    if (word.isEmpty) return '가';
+    final lastChar = word.codeUnitAt(word.length - 1);
+    if (lastChar < 0xAC00 || lastChar > 0xD7A3) return '가';
+    return (lastChar - 0xAC00) % 28 > 0 ? '이' : '가';
+  }
+
+  String _getDirectionAction(String direction) {
+    switch (direction) {
+      case 'left': return '왼쪽으로 이동하세요.';
+      case 'right': return '오른쪽으로 이동하세요.';
+      case 'stop': return '잠시 멈추세요.';
+      case 'forward': return '천천히 직진하세요.';
+      default: return '주의하며 이동하세요.';
     }
   }
 
@@ -284,6 +500,11 @@ class _CameraScreenState extends State<CameraScreen> {
       setState(() {
         _isReconnecting = true;
         _detections = const [];
+        _mainHazard = '';
+        _riskLevel = 'safe';
+        _speechQueue.clear();
+        _isSpeaking = false;
+        _currentSpeakingMessage = null;
       });
     }
 
@@ -324,10 +545,11 @@ class _CameraScreenState extends State<CameraScreen> {
     }
 
     try {
-      final probeFrame = await controller.takePicture();
+      final XFile probeFrame = await controller.takePicture();
       final reconnectResult = await _apiService.predictFromXFilePath(
         probeFrame.path,
         dangerThreshold: _dangerThreshold,
+        referenceDepth: _referenceDepth,
       );
 
       if (reconnectResult == null) {
@@ -339,7 +561,10 @@ class _CameraScreenState extends State<CameraScreen> {
         setState(() {
           _isReconnecting = false;
           _isGuidanceRunning = true;
-          _detections = reconnectResult;
+          _detections = reconnectResult.displayObjects;
+          _mainHazard = reconnectResult.mainHazard;
+          _riskLevel = reconnectResult.riskLevel;
+          _safeDirection = reconnectResult.safeDirection;
         });
       } else {
         _isReconnecting = false;
@@ -348,7 +573,12 @@ class _CameraScreenState extends State<CameraScreen> {
 
       _hasAnnouncedReconnect = false;
       await _speak('네트워크가 복구되어 안내를 재개합니다.');
-      await _handleVoiceGuidance(reconnectResult);
+      
+      // 재연결 시에도 방향 스무딩 초기화
+      _directionHistory.clear();
+      _directionHistory.add(reconnectResult.safeDirection);
+
+      await _handleVoiceGuidance(reconnectResult.displayObjects, reconnectResult);
       _startContinuousCapture();
     } catch (_) {
       _scheduleReconnect();
@@ -356,36 +586,54 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   Future<void> _triggerDynamicHaptic(int riskLevel) async {
-    final hasVibrator = await Vibration.hasVibrator() ?? false;
-    if (!hasVibrator) return;
+    try {
+      final hasVibrator = await Vibration.hasVibrator() ?? false;
+      if (!hasVibrator) return;
 
-    if (riskLevel == 2) {
-      // 위험: 다급한 3연속 진동
-      await Vibration.vibrate(pattern: [0, 200, 100, 200, 100, 200], intensities: [0, 255, 0, 255, 0, 255]);
-    } else if (riskLevel == 1) {
-      // 주의: 가벼운 짧은 진동 1번
-      await Vibration.vibrate(duration: 200, amplitude: 128);
+      if (riskLevel == 2) {
+        // danger: 강한 진동 3연속
+        await Vibration.vibrate(pattern: [0, 150, 50, 150, 50, 150], intensities: [0, 255, 0, 255, 0, 255]);
+      } else if (riskLevel == 1) {
+        // warning: 짧은 진동 1번
+        await Vibration.vibrate(duration: 300, amplitude: 128);
+      }
+    } catch (e) {
+      debugPrint('Haptic error: $e');
     }
   }
 
   Future<void> _stopCurrentSpeech() async {
+    _speechQueue.clear();
+    _isSpeaking = false;
     await _flutterTts.stop();
   }
 
-  Future<void> _speak(String message) async {
-    await _stopCurrentSpeech();
-    await _flutterTts.speak(message);
+  Future<void> _speak(String message, {bool urgent = false}) async {
+    _enqueueSpeech(message, 'system', urgent: urgent, interrupt: urgent);
   }
+
 
   @override
   void dispose() {
+    debugPrint('[Lifecycle] CameraScreen dispose started');
     _isDisposed = true;
+    _isGuidanceRunning = false;
     _captureTimer?.cancel();
     _reconnectTimer?.cancel();
+    
+    // 종료 시에는 큐를 비우고 즉시 정지만 수행 (새로운 발화 방지)
+    _speechQueue.clear();
     _flutterTts.stop();
+    debugPrint('[Lifecycle] TTS stopped in dispose');
+    
     _apiService.dispose();
     _cameraController?.dispose();
+    debugPrint('[Lifecycle] Camera and Service disposed');
+    
+    WidgetsBinding.instance.removeObserver(this);
+    _pulseController.dispose();
     super.dispose();
+    debugPrint('[Lifecycle] CameraScreen dispose completed');
   }
 
   @override
@@ -398,72 +646,269 @@ class _CameraScreenState extends State<CameraScreen> {
         child: Stack(
           fit: StackFit.expand,
           children: [
+            // 0. 카메라 프리뷰 (배경)
             _buildCameraPreview(),
-            Align(
-              alignment: Alignment.bottomCenter,
-              child: SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.only(bottom: 24),
-                  child: AnimatedOpacity(
-                    opacity: _isCameraReady ? 0.8 : 1,
-                    duration: const Duration(milliseconds: 220),
-                    child: Text(
-                      _isCameraReady
-                          ? (_isReconnecting
-                                ? '네트워크 복구 중 · 자동으로 재시도합니다'
-                                : (_isGuidanceRunning
-                                      ? '안내 실행 중 · 화면 아무 곳이나 더블 탭하면 중지'
-                                      : '화면 아무 곳이나 더블 탭하여 안내 시작'))
-                          : '카메라를 준비하고 있습니다...',
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                      ),
+            
+            // 1. 위험 상황 외곽 테두리 (Pulse)
+            _buildEdgeAlertBorder(),
+
+            // 2. 상단 상태 배지 및 설정 버튼
+            _buildTopBar(),
+
+            // 3. 중앙 대형 방향 안내
+            _buildDirectionOverlay(),
+
+            // 4. 하단 가이드 메시지 패널 및 조작 안내
+            _buildBottomInfoArea(),
+
+            // 5. 디버그 오버레이 (최상단)
+            if (_debugMode) _buildDebugOverlay(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTopBar() {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // 상태 배지 및 음성 아이콘
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _buildStatusBadge(),
+                const SizedBox(width: 12),
+                _buildVoiceStatusIcon(),
+              ],
+            ),
+            
+            // 설정 버튼 (Long press로 디버그 모드 진입)
+            Material(
+              color: Colors.transparent,
+              child: InkWell(
+                onTap: () async {
+                  if (_cameraController == null || !_cameraController!.value.isInitialized) return;
+                  if (_isGuidanceRunning || _isReconnecting) {
+                    _captureTimer?.cancel();
+                    _reconnectTimer?.cancel();
+                    await _stopCurrentSpeech();
+                    setState(() {
+                      _isGuidanceRunning = false;
+                      _isReconnecting = false;
+                    });
+                  }
+                  
+                  if (!mounted) return;
+                  await Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => CalibrationScreen(cameraController: _cameraController!),
                     ),
+                  );
+                  if (mounted) await _loadCalibrationData();
+                },
+                onLongPress: () {
+                  setState(() => _debugMode = !_debugMode);
+                  _speak(_debugMode ? '디버그 모드를 켭니다.' : '디버그 모드를 끕니다.');
+                },
+                borderRadius: BorderRadius.circular(30),
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.5),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    _debugMode ? Icons.bug_report : Icons.tune,
+                    color: _debugMode ? Colors.redAccent : Colors.white,
+                    size: 32,
                   ),
                 ),
               ),
             ),
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 12,
-              right: 12,
-              child: SafeArea(
-                child: IconButton(
-                  onPressed: () async {
-                    if (_cameraController == null || !_cameraController!.value.isInitialized) return;
+          ],
+        ),
+      ),
+    );
+  }
 
-                    // 안내가 실행 중이면 먼저 종료
-                    if (_isGuidanceRunning || _isReconnecting) {
-                      _captureTimer?.cancel();
-                      _reconnectTimer?.cancel();
-                      await _stopCurrentSpeech();
-                      setState(() {
-                        _isGuidanceRunning = false;
-                        _isReconnecting = false;
-                      });
-                    }
+  Widget _buildStatusBadge() {
+    Color color;
+    String label;
+    IconData icon;
 
-                    if (!mounted) return;
+    if (_riskLevel == 'danger' || _safeDirection == 'stop') {
+      color = Colors.red;
+      label = '위험';
+      icon = Icons.warning;
+    } else if (_riskLevel == 'warning') {
+      color = Colors.orange;
+      label = '주의';
+      icon = Icons.priority_high;
+    } else {
+      color = Colors.green;
+      label = '안전';
+      icon = Icons.check_circle;
+    }
 
-                    await Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => CalibrationScreen(cameraController: _cameraController!),
-                      ),
-                    );
-                    
-                    // 돌아오면 설정값만 불러오기
-                    if (mounted) {
-                      await _loadDangerThreshold();
-                    }
-                  },
-                  icon: const Icon(Icons.tune, color: Colors.white),
-                  tooltip: '거리 보정 설정',
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(30),
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.4), blurRadius: 8)],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: Colors.white, size: 28),
+          const SizedBox(width: 12),
+          Text(
+            label,
+            style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.w900),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEdgeAlertBorder() {
+    if (_riskLevel == 'safe' && _safeDirection != 'stop') return const SizedBox.shrink();
+
+    return AnimatedBuilder(
+      animation: _pulseController,
+      builder: (context, child) {
+        final color = (_riskLevel == 'danger' || _safeDirection == 'stop') ? Colors.red : Colors.orange;
+        return Container(
+          decoration: BoxDecoration(
+            border: Border.all(
+              color: color.withOpacity(0.3 + (_pulseController.value * 0.5)),
+              width: 15.0 + (_pulseController.value * 10.0),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildVoiceStatusIcon() {
+    return Container(
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.5),
+        shape: BoxShape.circle,
+      ),
+      child: Icon(
+        _isGuidanceRunning ? Icons.volume_up : Icons.volume_off,
+        color: _isGuidanceRunning ? Colors.white : Colors.redAccent,
+        size: 24,
+      ),
+    );
+  }
+
+  Widget _buildBottomInfoArea() {
+    return Align(
+      alignment: Alignment.bottomCenter,
+      child: SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // 가이드 메시지 패널
+            _buildGuideMessagePanel(),
+            
+            // 조작 안내 힌트 (메시지 아래에 작게 표시)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 16, top: 8),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.3),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Text(
+                  '화면을 두 번 탭하면 음성 안내를 켜거나 끌 수 있습니다.',
+                  style: TextStyle(
+                    color: Colors.white70,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                  ),
                 ),
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGuideMessagePanel() {
+    if (!_isGuidanceRunning || _isReconnecting) return const SizedBox.shrink();
+    
+    final message = _lastResponse?.guideMessage ?? '';
+    if (message.isEmpty) return const SizedBox.shrink();
+
+    Color borderColor = Colors.transparent;
+    if (_riskLevel == 'danger') borderColor = Colors.red;
+    else if (_riskLevel == 'warning') borderColor = Colors.orange;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.85),
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: borderColor, width: 4),
+        ),
+        child: Text(
+          message,
+          textAlign: TextAlign.center,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 32,
+            fontWeight: FontWeight.bold,
+            height: 1.3,
+          ),
+        ),
+      ),
+    );
+  }
+
+  // _buildBottomControls 제거됨
+
+  Widget _buildDebugOverlay() {
+    final response = _lastResponse;
+    return Positioned(
+      left: 16,
+      top: 150,
+      child: IgnorePointer(
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.8),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.redAccent, width: 2),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('[DEBUG INFO]', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
+              const Divider(color: Colors.white24),
+              Text('Source: ${response?.guideSource ?? 'N/A'}', style: const TextStyle(color: Colors.yellow, fontSize: 14)),
+              Text('Latency: ${response?.processTime ?? 'N/A'}', style: const TextStyle(color: Colors.white, fontSize: 14)),
+              Text('Risk Raw: ${response?.riskLevel ?? 'safe'}', style: const TextStyle(color: Colors.white, fontSize: 14)),
+              Text('Dir Raw: ${response?.safeDirection ?? 'forward'}', style: const TextStyle(color: Colors.white, fontSize: 14)),
+              Text('Objects: ${_detections.length}', style: const TextStyle(color: Colors.white, fontSize: 14)),
+              Text('Status: ${_isReconnecting ? "Reconnecting" : "Stable"}', style: const TextStyle(color: Colors.cyan, fontSize: 14)),
+            ],
+          ),
         ),
       ),
     );
@@ -493,13 +938,83 @@ class _CameraScreenState extends State<CameraScreen> {
                 child: CustomPaint(
                   painter: DetectionOverlayPainter(
                     detections: _detections,
-                    strokeColor: const Color(0xFF00E5FF),
                   ),
                 ),
               ),
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildDirectionOverlay() {
+    if (!_isGuidanceRunning || _isReconnecting) return const SizedBox.shrink();
+
+    IconData icon;
+    String text;
+    Color color;
+
+    switch (_safeDirection) {
+      case 'left':
+        icon = Icons.arrow_back;
+        text = '왼쪽 이동';
+        color = Colors.orange;
+        break;
+      case 'right':
+        icon = Icons.arrow_forward;
+        text = '오른쪽 이동';
+        color = Colors.orange;
+        break;
+      case 'stop':
+        icon = Icons.pan_tool;
+        text = '정지';
+        color = Colors.redAccent;
+        break;
+      case 'forward':
+      default:
+        icon = Icons.arrow_upward;
+        text = '직진 가능';
+        color = Colors.greenAccent;
+        break;
+    }
+
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(32),
+            decoration: BoxDecoration(
+              color: Colors.black.withOpacity(0.7),
+              shape: BoxShape.circle,
+              border: Border.all(color: color, width: 8),
+              boxShadow: [
+                BoxShadow(color: color.withOpacity(0.3), blurRadius: 20, spreadRadius: 5),
+              ],
+            ),
+            child: Icon(icon, size: 140, color: color),
+          ),
+          const SizedBox(height: 24),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
+            decoration: BoxDecoration(
+              color: color,
+              borderRadius: BorderRadius.circular(40),
+              boxShadow: [
+                BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 10, offset: const Offset(0, 4)),
+              ],
+            ),
+            child: Text(
+              text,
+              style: const TextStyle(
+                color: Colors.black,
+                fontSize: 42,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

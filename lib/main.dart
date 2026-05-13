@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
@@ -7,20 +8,25 @@ import 'screens/camera_screen.dart';
 List<CameraDescription> globalCameras = [];
 
 void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+  runZonedGuarded(() async {
+    WidgetsFlutterBinding.ensureInitialized();
 
-  // 카메라 목록 미리 로드
-  globalCameras = await availableCameras();
+    // 카메라 목록 미리 로드
+    globalCameras = await availableCameras();
 
-  SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
-  SystemChrome.setSystemUIOverlayStyle(
-    const SystemUiOverlayStyle(
-      statusBarColor: Colors.transparent,
-      statusBarIconBrightness: Brightness.light,
-    ),
-  );
+    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+    SystemChrome.setSystemUIOverlayStyle(
+      const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.light,
+      ),
+    );
 
-  runApp(const SafeStepApp());
+    runApp(const SafeStepApp());
+  }, (error, stack) {
+    debugPrint('[FatalError] $error');
+    debugPrint('[FatalStackTrace] $stack');
+  });
 }
 
 class SafeStepApp extends StatelessWidget {

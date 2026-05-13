@@ -22,7 +22,7 @@ class ApiException implements Exception {
 
 class ApiService {
   // 컴퓨터의 Wi-Fi IP 주소로 변경하여 스마트폰에서 접속 가능하도록 설정
-  static const String serverBaseUrl = 'http://192.168.45.228:8001';
+  static const String serverBaseUrl = 'http://10.0.24.103:8001';
   static const Duration _requestTimeout = Duration(seconds: 30);
 
   final http.Client _client;
@@ -31,27 +31,20 @@ class ApiService {
 
   Uri get _predictUri => Uri.parse('$serverBaseUrl/predict/objects-distance');
 
-  Future<List<DetectionResult>?> predictFromXFilePath(
+  Future<PredictionResponse?> predictFromXFilePath(
     String imagePath, {
     double dangerThreshold = 1.5,
+    double referenceDepth = 1.0,
   }) async {
     try {
       final originalFile = File(imagePath);
       final originalBytes = await originalFile.readAsBytes();
 
-      // 무거운 이미지 처리 작업을 Isolate(백그라운드 스레드)로 분리하여 UI 멈춤 현상(과부하) 방지
       final compressedBytes = await compute(_processImage, originalBytes);
 
       if (compressedBytes == null) {
-        print('🔥 [Image Process Error] 이미지 처리 실패');
         return null;
       }
-
-      final originalSizeKb = originalBytes.length / 1024;
-      final compressedSizeKb = compressedBytes.length / 1024;
-      print(
-        '📦 [Image Compress (Isolate)] ${originalSizeKb.toStringAsFixed(1)}KB -> ${compressedSizeKb.toStringAsFixed(1)}KB',
-      );
 
       final timestamp = DateTime.now().microsecondsSinceEpoch;
       final tempFilePath =
@@ -69,19 +62,20 @@ class ApiService {
         );
 
       request.fields['danger_threshold'] = dangerThreshold.toString();
+      request.fields['reference_depth'] = referenceDepth.toString();
 
       return await _sendAndParse(request);
     } catch (e) {
-      print('🔥 [API Request Error] predictFromXFilePath 실패: $e');
       if (e is ApiException) rethrow;
       throw ApiException(ApiErrorType.unknown, e.toString());
     }
   }
 
-  Future<List<DetectionResult>?> predictFromBytes(
+  Future<PredictionResponse?> predictFromBytes(
     Uint8List imageBytes, {
     String filename = 'frame.jpg',
     double dangerThreshold = 1.5,
+    double referenceDepth = 1.0,
   }) async {
     try {
       final request = http.MultipartRequest('POST', _predictUri)
@@ -95,22 +89,15 @@ class ApiService {
         );
 
       request.fields['danger_threshold'] = dangerThreshold.toString();
+      request.fields['reference_depth'] = referenceDepth.toString();
 
       return await _sendAndParse(request);
-    } on TimeoutException {
-      return null;
-    } on SocketException {
-      return null;
-    } on HttpException {
-      return null;
-    } on FormatException {
-      return null;
     } catch (_) {
       return null;
     }
   }
 
-  Future<List<DetectionResult>?> _sendAndParse(
+  Future<PredictionResponse?> _sendAndParse(
     http.MultipartRequest request,
   ) async {
     try {
@@ -129,17 +116,12 @@ class ApiService {
       }
 
       final decoded = jsonDecode(response.body);
-      if (decoded is! Map<String, dynamic> || !decoded.containsKey('objects')) {
-        print('🔥 [API Parse Error] JSON이 예상된 형태(Map with "objects")가 아닙니다.');
+      if (decoded is! Map<String, dynamic> || !decoded.containsKey('display_objects')) {
+        print('🔥 [API Parse Error] JSON이 예상된 형태(Map with "display_objects")가 아닙니다.');
         throw ApiException(ApiErrorType.parseError, '잘못된 JSON 형식');
       }
 
-      final objectsList = decoded['objects'] as List;
-
-      return objectsList
-          .whereType<Map>()
-          .map((item) => DetectionResult.fromJson(item.cast<String, dynamic>()))
-          .toList();
+      return PredictionResponse.fromJson(decoded);
     } on TimeoutException {
       throw ApiException(ApiErrorType.timeout, '서버 응답 지연');
     } on SocketException {

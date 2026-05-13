@@ -4,78 +4,102 @@ import '../../models/detection_result.dart';
 class DetectionOverlayPainter extends CustomPainter {
   const DetectionOverlayPainter({
     required this.detections,
-    required this.strokeColor,
   });
 
   final List<DetectionResult> detections;
-  final Color strokeColor;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final rectPaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.5
-      ..color = strokeColor;
+    if (detections.isEmpty) return;
 
-    for (final detection in detections) {
-      final x1 = detection.bbox.x1;
-      final y1 = detection.bbox.y1;
-      final x2 = detection.bbox.x2;
-      final y2 = detection.bbox.y2;
+    try {
+      for (final detection in detections) {
+        // 위험도에 따른 색상 설정
+        Color riskColor;
+        String riskText;
+        if (detection.riskLevel == 2) {
+          riskColor = Colors.red;
+          riskText = '위험';
+        } else if (detection.riskLevel == 1) {
+          riskColor = Colors.orange;
+          riskText = '주의';
+        } else {
+          riskColor = Colors.green;
+          riskText = '안전';
+        }
 
-      // 서버가 정규화 좌표(0~1) 혹은 절대 픽셀 좌표를 보낼 수 있으므로 둘 다 대응
-      final isNormalized = x2 <= 1.0 && y2 <= 1.0;
-      final rect = isNormalized
-          ? Rect.fromLTRB(
-              x1 * size.width,
-              y1 * size.height,
-              x2 * size.width,
-              y2 * size.height,
-            )
-          : Rect.fromLTRB(x1, y1, x2, y2);
+        final rectPaint = Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 4.0 // 더 굵게 변경
+          ..color = riskColor;
 
-      canvas.drawRect(rect, rectPaint);
+        final x1 = detection.bbox.x1;
+        final y1 = detection.bbox.y1;
+        final x2 = detection.bbox.x2;
+        final y2 = detection.bbox.y2;
 
-      final distLabel = detection.distanceRaw.isNotEmpty
-          ? detection.distanceRaw
-          : '${detection.distanceM.toStringAsFixed(1)}m';
+        final isNormalized = x2 <= 1.0 && y2 <= 1.0;
+        final rect = isNormalized
+            ? Rect.fromLTRB(
+                x1 * size.width,
+                y1 * size.height,
+                x2 * size.width,
+                y2 * size.height,
+              )
+            : Rect.fromLTRB(x1, y1, x2, y2);
 
-      final textSpan = TextSpan(
-        text: '${detection.label} $distLabel',
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 13,
-          fontWeight: FontWeight.w700,
-        ),
-      );
-      final textPainter = TextPainter(
-        text: textSpan,
-        textDirection: TextDirection.ltr,
-      )..layout(maxWidth: size.width);
+        // 너무 작은 박스는 그리지 않음 (가독성 방해)
+        if (rect.width < 10 || rect.height < 10) continue;
 
-      final badgePadding = 6.0;
-      final badgeHeight = textPainter.height + badgePadding * 2;
-      final badgeWidth = textPainter.width + badgePadding * 2;
-      final badgeTop = (rect.top - badgeHeight).clamp(0, size.height);
-      final badgeRect = Rect.fromLTWH(rect.left, badgeTop.toDouble(), badgeWidth.toDouble(), badgeHeight.toDouble());
+        canvas.drawRect(rect, rectPaint);
 
-      canvas.drawRect(
-        badgeRect,
-        Paint()..color = Colors.black.withOpacity(0.72),
-      );
-      textPainter.paint(
-        canvas,
-        Offset(
-          badgeRect.left + badgePadding,
-          badgeRect.top + badgePadding,
-        ),
-      );
+        // 라벨 생성: [이름] / [거리] / [위험도]
+        final distStr = detection.distanceText.isNotEmpty ? ' / ${detection.distanceText}' : '';
+        final labelText = '${detection.koreanName}$distStr / $riskText';
+        
+        final textSpan = TextSpan(
+          text: labelText,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 18, // 글자 크기 확대
+            fontWeight: FontWeight.bold,
+          ),
+        );
+        final textPainter = TextPainter(
+          text: textSpan,
+          textDirection: TextDirection.ltr,
+        )..layout(maxWidth: size.width > 0 ? size.width : 100);
+
+        const badgePadding = 8.0;
+        final badgeHeight = textPainter.height + badgePadding;
+        final badgeWidth = textPainter.width + badgePadding * 2;
+        
+        double safeTop = rect.top - badgeHeight;
+        if (safeTop < 0) safeTop = rect.top; // 박스 안쪽에 표시
+
+        final badgeRect = Rect.fromLTWH(rect.left, safeTop, badgeWidth, badgeHeight);
+
+        // 고대비 배경
+        canvas.drawRect(
+          badgeRect,
+          Paint()..color = riskColor.withOpacity(0.85),
+        );
+        
+        textPainter.paint(
+          canvas,
+          Offset(
+            badgeRect.left + badgePadding,
+            badgeRect.top + badgePadding / 2,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Painting error: $e');
     }
   }
 
   @override
   bool shouldRepaint(covariant DetectionOverlayPainter oldDelegate) {
-    return oldDelegate.detections != detections ||
-        oldDelegate.strokeColor != strokeColor;
+    return oldDelegate.detections != detections;
   }
 }

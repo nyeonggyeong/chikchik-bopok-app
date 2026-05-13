@@ -35,12 +35,11 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
 
     try {
       final frame = await controller.takePicture();
-      // 위험 기준을 구하기 위해 임시로 아주 큰 값을 보냄
-      final detections = await _apiService.predictFromXFilePath(frame.path, dangerThreshold: 100.0);
+      final response = await _apiService.predictFromXFilePath(frame.path, dangerThreshold: 100.0);
 
       if (!mounted) return;
 
-      if (detections == null || detections.isEmpty) {
+      if (response == null || response.objects.isEmpty) {
         setState(() {
           _statusMessage = '인식된 물체가 없습니다. 다시 시도해 주세요.';
         });
@@ -48,7 +47,7 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
       }
 
       // 가장 가까운 물체의 distanceM(상대 깊이 스코어)를 추출
-      final nearest = detections.reduce((a, b) => a.distanceM <= b.distanceM ? a : b);
+      final nearest = response.objects.reduce((a, b) => a.distanceM <= b.distanceM ? a : b);
       
       final newThreshold = nearest.distanceM;
       

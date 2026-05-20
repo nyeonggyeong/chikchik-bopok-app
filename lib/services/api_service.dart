@@ -22,7 +22,7 @@ class ApiException implements Exception {
 
 class ApiService {
   // 컴퓨터의 Wi-Fi IP 주소로 변경하여 스마트폰에서 접속 가능하도록 설정
-  static const String serverBaseUrl = 'http://10.0.24.103:8001';
+  static const String serverBaseUrl = 'http://10.0.29.72:8001';
   static const Duration _requestTimeout = Duration(seconds: 30);
 
   final http.Client _client;
@@ -116,8 +116,11 @@ class ApiService {
       }
 
       final decoded = jsonDecode(response.body);
-      if (decoded is! Map<String, dynamic> || !decoded.containsKey('display_objects')) {
-        print('🔥 [API Parse Error] JSON이 예상된 형태(Map with "display_objects")가 아닙니다.');
+      if (decoded is! Map<String, dynamic> ||
+          !decoded.containsKey('display_objects')) {
+        print(
+          '🔥 [API Parse Error] JSON이 예상된 형태(Map with "display_objects")가 아닙니다.',
+        );
         throw ApiException(ApiErrorType.parseError, '잘못된 JSON 형식');
       }
 

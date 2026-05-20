@@ -32,6 +32,7 @@ class _CameraScreenState extends State<CameraScreen> with TickerProviderStateMix
   bool _isDisposed = false;
   double _dangerThreshold = 1.5;
   double _referenceDepth = 1.0;
+  String? _cameraErrorMessage; // 카메라 초기화 에러 메시지
 
   // 피드백 쿨다운 및 상태 변수
   String _lastRiskLevel = 'safe';
@@ -131,30 +132,50 @@ class _CameraScreenState extends State<CameraScreen> with TickerProviderStateMix
 
 
   Future<void> _initializeCamera() async {
-    final cameras = await availableCameras();
-    if (cameras.isEmpty || !mounted) return;
+    try {
+      if (mounted) setState(() => _cameraErrorMessage = null);
 
-    final backCamera = cameras.firstWhere(
-      (camera) => camera.lensDirection == CameraLensDirection.back,
-      orElse: () => cameras.first,
-    );
+      final cameras = await availableCameras();
+      if (cameras.isEmpty || !mounted) {
+        if (mounted) setState(() => _cameraErrorMessage = '카메라를 찾을 수 없습니다.');
+        return;
+      }
 
-    final controller = CameraController(
-      backCamera,
-      ResolutionPreset.medium,
-      enableAudio: false,
-    );
+      final backCamera = cameras.firstWhere(
+        (camera) => camera.lensDirection == CameraLensDirection.back,
+        orElse: () => cameras.first,
+      );
 
-    await controller.initialize();
-    if (!mounted) {
-      await controller.dispose();
-      return;
+      final controller = CameraController(
+        backCamera,
+        ResolutionPreset.medium,
+        enableAudio: false,
+      );
+
+      await controller.initialize();
+      if (!mounted) {
+        await controller.dispose();
+        return;
+      }
+
+      setState(() {
+        _cameraController = controller;
+        _isCameraReady = true;
+        _cameraErrorMessage = null;
+      });
+      debugPrint('[Camera] 카메라 초기화 성공');
+    } catch (e) {
+      debugPrint('[Camera] 카메라 초기화 실패: $e');
+      if (mounted) {
+        setState(() {
+          _cameraErrorMessage = '카메라 권한을 확인하거나 다른 앱의 카메라를 종료해 주세요.\n(오류: $e)';
+        });
+        // 2초 후 자동 재시도
+        Future.delayed(const Duration(seconds: 2), () {
+          if (mounted && !_isCameraReady) _initializeCamera();
+        });
+      }
     }
-
-    setState(() {
-      _cameraController = controller;
-      _isCameraReady = true;
-    });
   }
 
   Future<void> _toggleGuidance() async {
@@ -364,9 +385,8 @@ class _CameraScreenState extends State<CameraScreen> with TickerProviderStateMix
       }
     }
 
-    // 상황 키 생성 (Phase 5.6: 상황 변화 감지용)
-    final objectsKey = response.displayObjects.map((o) => '${o.labelKo}:${o.riskLevel}').join(',');
-    final currentSituationKey = '${currentRiskLevel}_${response.safeDirection}_$objectsKey';
+    // 상황 키 생성: 위험도와 방향만 사용 (객체 단위로 바꾸면 너무 자주 달라져 TTS가 계속 끊김)
+    final currentSituationKey = '${currentRiskLevel}_${response.safeDirection}';
 
     bool isUrgent = currentRiskLevel == 'danger' || response.safeDirection == 'stop';
 
@@ -389,7 +409,9 @@ class _CameraScreenState extends State<CameraScreen> with TickerProviderStateMix
     }
 
     if (shouldProvideFeedback && spokenSentence.isNotEmpty) {
-      _enqueueSpeech(spokenSentence, currentSituationKey, urgent: isUrgent, interrupt: isUrgent);
+      // 말 중에는 끊지 않음. 단, 새로 danger가 될 때만 즉시 끊고 안내
+      final shouldInterrupt = isUrgent && _lastRiskLevel != 'danger';
+      _enqueueSpeech(spokenSentence, currentSituationKey, urgent: isUrgent, interrupt: shouldInterrupt);
       
       // 위험도에 따른 차별화된 햅틱 진동
       if (isUrgent || (currentRiskLevel == 'warning' && _lastRiskLevel != 'warning')) {
@@ -441,9 +463,10 @@ class _CameraScreenState extends State<CameraScreen> with TickerProviderStateMix
 
     final now = DateTime.now();
     
-    // Phase 5.6: 오래된 메시지 폐기 로직
-    bool isStale = now.difference(timestamp).inSeconds >= 2;
-    bool isSituationChanged = _lastSituationKey != null && _lastSituationKey != msgSituationKey;
+    // 오래된 메시지 폐기 로직: 6초 이상 지난 메시지만 버림 (TTS 발화 시간 고려)
+    bool isStale = now.difference(timestamp).inSeconds >= 6;
+    // situationKey가 단순화(위험도+방향)되었으므로 상황 변화 감지는 isStale만으로 충분
+    bool isSituationChanged = false;
 
     if (!urgent && (isStale || isSituationChanged)) {
       debugPrint('🚫 [TTS Skip] Stale or Situation changed: $message');
@@ -916,7 +939,49 @@ class _CameraScreenState extends State<CameraScreen> with TickerProviderStateMix
 
   Widget _buildCameraPreview() {
     if (!_isCameraReady || _cameraController == null) {
-      return const ColoredBox(color: Colors.black);
+      // 에러가 있으면 에러 메시지 표시, 없으면 로딩 중
+      if (_cameraErrorMessage != null) {
+        return ColoredBox(
+          color: Colors.black,
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(32),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.camera_alt_outlined, color: Colors.white54, size: 64),
+                  const SizedBox(height: 16),
+                  Text(
+                    _cameraErrorMessage!,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white70, fontSize: 16),
+                  ),
+                  const SizedBox(height: 24),
+                  ElevatedButton.icon(
+                    onPressed: _initializeCamera,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('다시 시도'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      }
+      // 로딩 중
+      return const ColoredBox(
+        color: Colors.black,
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(color: Colors.white54),
+              SizedBox(height: 16),
+              Text('카메라 초기화 중...', style: TextStyle(color: Colors.white54, fontSize: 16)),
+            ],
+          ),
+        ),
+      );
     }
 
     final controller = _cameraController!;
